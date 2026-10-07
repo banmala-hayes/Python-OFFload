@@ -1,0 +1,152 @@
+import os
+import sys
+import json
+import asyncio
+import boto3
+from botocore.exceptions import ClientError
+
+# SDK Corrected Imports
+from msgraph import GraphServiceClient
+from msgraph.generated.models.user import User as GraphUser
+from azure.identity.aio import DefaultAzureCredential
+from okta.client import Client as OktaClient
+from okta.errors.okta_api_error import OktaAPIError
+
+# ==============================================================================
+# CONFIGURATION & RUNTIME VALIDATION
+# ==============================================================================
+TARGET_IDENTITY = os.getenv("TARGET_IDENTITY")
+AWS_USER_NAME   = os.getenv("AWS_USER_NAME")
+
+if not TARGET_IDENTITY:
+    print("[-] CONFIGURATION ERROR: TARGET_IDENTITY environment variable is required.")
+    sys.exit(1)
+
+# ==============================================================================
+# 1. AWS IAM ISOLATION LAYER
+# ==============================================================================
+def isolate_aws(username):
+    """Applies an explicit Deny-All policy and destroys active console profiles."""
+    print(f"[*] Initiating AWS isolation for user target: {username}")
+    try:
+        session = boto3.Session()
+        iam = session.client('iam')
+        
+        deny_policy = {
+            "Version": "2012-10-17",
+            "Statement": [{"Effect": "Deny", "Action": "*", "Resource": "*"}]
+        }
+        
+        serialized_policy = json.dumps(deny_policy)
+        
+        # Attach explicit Deny inline boundary override
+        iam.put_user_policy(
+            UserName=username,
+            PolicyName="Emergency-Incident-Response-DenyAll",
+            PolicyDocument=serialized_policy
+        )
+        print("[+] AWS Inline Policy Guardrail Applied Successfully.")
+        
+        # Terminate active web session surface area
+        try:
+            iam.delete_login_profile(UserName=username)
+            print("[+] AWS Console Login Profile removed successfully.")
+        except ClientError as ce:
+            if ce.response['Error']['Code'] == 'NoSuchEntity':
+                print("[*] AWS Notification: User did not possess an active console login profile.")
+            else:
+                print(f"[-] AWS Login Profile Removal Alert: {ce.response['Error']['Message']}")
+                raise ce
+                
+        print("[+] AWS Target Containment Sequence Complete.")
+    except Exception as e:
+        print(f"[-] CRITICAL: AWS Isolation Sequence Failure: {e}")
+        raise e
+
+# ==============================================================================
+# 2. MICROSOFT ENTRA ID ISOLATION LAYER
+# ==============================================================================
+async def isolate_azure(upn):
+    """Locks Entra authentication capabilities and invalidates current application sessions."""
+    print(f"[*] Initiating Microsoft Entra ID isolation for target UPN: {upn}")
+    try:
+        # Explicit asynchronous credential provider initialization
+        credential = DefaultAzureCredential()
+        graph_client = GraphServiceClient(credentials=credential)
+        
+        # MS Graph SDK explicit User model configuration
+        user_update = GraphUser(account_enabled=False)
+        
+        await graph_client.users.by_user_id(upn).patch(user_update)
+        print("[+] Entra ID Authentication state changed to: DISABLED.")
+        
+        # Revoke active OAuth refresh tokens to clear active mobile/desktop sessions
+        await graph_client.users.by_user_id(upn).revoke_sign_in_sessions.post()
+        print("[+] Entra ID Active Token revocation broadcast completed.")
+        
+        print("[+] Entra ID Target Containment Sequence Complete.")
+    except Exception as e:
+        print(f"[-] CRITICAL: Entra ID Isolation Sequence Failure: {e}")
+        raise e
+
+# ==============================================================================
+# 3. OKTA IDP LAYER (FIXED PARAMETER OBJECT HANDLING)
+# ==============================================================================
+async def isolate_okta(email):
+    """Clears existing application session tokens and suspends directory routing."""
+    print(f"[*] Initiating Okta isolation for target email: {email}")
+    try:
+        okta_client = OktaClient()
+        
+        try:
+            # SDK response tuple handling verification
+            user_response = await okta_client.get_user(email)
+            # Safe checking for multi-version SDK return footprints
+            user = user_response[0] if isinstance(user_response, tuple) else user_response
+        except OktaAPIError as oae:
+            raise RuntimeError(f"Okta Target Lookup Failed: {oae.message}")
+        
+        # FIX: Explicit extraction of user.id to guarantee correct typing parameters are dispatched
+        target_uid = user.id
+        
+        # Purge existing active web session profiles immediately via clean variable signatures
+        await okta_client.clear_user_sessions(target_uid)
+        print("[+] Okta Session token cancellation complete.")
+        
+        # Suspend directory state to reject new authentication vectors
+        await okta_client.suspend_user(target_uid)
+        print("[+] Okta Identity routing status changed to: SUSPENDED.")
+        
+        print("[+] Okta Target Containment Sequence Complete.")
+    except Exception as e:
+        print(f"[-] CRITICAL: Okta Isolation Sequence Failure: {e}")
+        raise e
+
+# ==============================================================================
+# ORCHESTRATION PIPELINE CORE
+# ==============================================================================
+async def main():
+    print(f"[!] ENFORCING OFFBOARDING ISOLATION RUNTIME FOR: {TARGET_IDENTITY}\n" + "="*60)
+    
+    # Run all containment operations in parallel to enforce zero-entropy synchronization
+    results = await asyncio.gather(
+        asyncio.to_thread(isolate_aws, AWS_USER_NAME or TARGET_IDENTITY),
+        isolate_azure(TARGET_IDENTITY),
+        isolate_okta(TARGET_IDENTITY),
+        return_exceptions=True
+    )
+    
+    # Evaluate runtime execution health
+    failures = [res for res in results if isinstance(res, Exception)]
+    print("="*60)
+    if failures:
+        print(f"[-] PIPELINE ALERT: {len(failures)} cloud target directory tasks failed to isolate successfully.")
+        for idx, res in enumerate(results):
+            if isinstance(res, Exception):
+                print(f"    -> Task {idx} Failed with: {res}")
+        sys.exit(2)
+    else:
+        print("[!] SUCCESS: Universal multi-cloud offboarding containment finalized safely.")
+
+if __name__ == "__main__":
+    asyncio.run(main())
